@@ -1,0 +1,205 @@
+---
+title: "Cleaning,imputation&Sampling"
+author: "Weiheng Zhang"
+date: "2022/5/7"
+output: 
+    pdf_document :
+      latex_engine : xelatex
+---
+
+
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(mlbench)
+library(pROC)
+library(pdp)
+library(vip)
+library(visdat)
+library(AppliedPredictiveModeling)
+library(performanceEstimation)
+library(mice)
+library(ROSE)
+library(gridExtra)
+library(mvtnorm)
+library(ISLR)
+library(corrplot)
+library(rpart.plot)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_color_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+
+
+# Introduction
+Stroke is a horrible medical emergency that may even kill the patient in minutes. The World Health Organization have noted stroke as the second leading cause of global death, with approximately 11 percent of deaths are directly related to stroke. According to the data from US CDC, there is a new stroke death in the US for every 4 minutes (https://www.cdc.gov/stroke/facts.htm).     
+Fortunately, chance of getting a stroke is related to the patient's body statistics and living habits. For this project, I will use the patient information dataset from kaggle to train classification models that will determine whether a patient will get a stroke, based on the patient's health data. If there is a model that can accurately predict the stroke based on body stats, then the patients in danger will be alerted early and seek medical assistance before having serious injury to the brain.   
+Data source: https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset  
+  
+The dataset contains the following predictor parameters of the patient:   
+gender: "Male", "Female" or "Other"  
+age: age of the patient  
+hypertension: "No" if the patient doesn't have hypertension, "Yes" if the patient has hypertension  
+heart_disease: "No" if the patient doesn't have any heart diseases, "Yes" if the patient has a heart disease  
+ever_married: "No" or "Yes"  
+work_type: "children", "Govt_jov", "Never_worked", "Private" or "Self-employed"  
+Residence_type: "Rural" or "Urban"  
+avg_glucose_level: average glucose level in blood  
+bmi: body mass index  
+smoking_status: "formerly smoked", "never smoked", "smokes" or "Unknown"  
+  
+And the response variable will be: stroke: "Yes" if the patient had a stroke or "No" if not.  
+
+
+
+
+### Import the data, perform initial cleaning and generate numeric summary
+```{r  warning=FALSE, message=FALSE}
+set.seed(7)
+
+stroke_df_ori = read_csv("./healthcare-dataset-stroke-data.csv") #stroke_df_ori
+
+stroke_df_demo = stroke_df_ori[, -1] %>% 
+  janitor::clean_names() %>% 
+  filter(gender == "Male" | gender == "Female" ) %>% 
+  mutate(bmi = as.numeric(bmi),
+         gender = as.numeric(factor(gender)) - 1,
+         ever_married = as.numeric(factor(ever_married)) - 1,
+         work_type = as.numeric(factor(work_type)) - 1,
+         residence_type = as.numeric(factor(residence_type)) - 1,
+         smoking_status = as.numeric(factor(smoking_status)) - 1,
+         stroke = factor(stroke,
+                         levels = c("0", "1"),
+                         labels = c("neg", "pos")))
+
+#stroke_df_demo
+stroke_df = stroke_df_demo
+skimr::skim(stroke_df_demo) # page limits!!!
+#summary(stroke_df_demo)
+```
+
+There are 5109 observations in the dataset. The outcome is the binary variable "Stroke". There are 7 categorical predictors and 3 numeric predictors.   
+
+
+**Check the distribution of missing values**    
+```{r  fig.height=4}
+vis_miss(stroke_df_demo)
+```
+
+The outcome is not balanced, that among all 5109 observations, only 249 of them have the stroke. I will consider using upsampling on the training set of each fold to overcome the class imbalance.
+There are 201 observations with missing "bmi" values, which is less than 5% of all observations. I could drop_na() to delete those observations, but that will not be elegant. Instead, I will use KNN imputation to fill these NAs.
+
+
+
+### Get a glance about the relationship between predictor and response.
+
+**Continuous**  
+```{r fig.height=2}
+featurePlot(x = stroke_df_demo[, c(2,8,9)], 
+            y = stroke_df_demo$stroke,
+            scales = list(x = list(relation = "free"), 
+                          y = list(relation = "free")),
+            plot = "density", pch = "|", 
+            auto.key = list(columns = 2))
+```
+
+From the proportions in the current dataset:  
+Older patients tend to have a much higher chance to get stroke comparing to younger patients. I expect to see age as a significant predictor in the models.   
+Patients with higher average glucose level tend to have a higher chance to get stroke.  
+I will expect to see age and average glucose level as significant predictors.  
+We can also observe the distribution of avg_glucose_level is not normal. Thus I will not consider using LDA or QDA model.
+
+
+
+
+### KNN Imputation to fill NAs in "bmi" and shuffle the rows in the dataset
+```{r}
+knnImp = preProcess(as.data.frame(stroke_df), method = "knnImpute", k = 3)
+stroke_df= predict(knnImp, stroke_df)
+sapply(stroke_df, function(x) sum(is.na(x)))
+stroke_df = stroke_df[sample(nrow(stroke_df)),]
+stroke_df = as_tibble(stroke_df)
+```
+
+
+
+### Split into training and testing data. 
+The dataset is split into 70% train and 30% test. The upsampling of training datasets will be done in the model training control.  
+I also perform random undersample on the testing dataset, because without doing it, the testing no information rate will be around 95%, which will make random guessing be more accurate than any model.
+```{r  warning=FALSE}
+# split into 70% train, 30% test
+partition = createDataPartition(y = stroke_df$stroke, p = 0.7, list = F)
+
+train_df = stroke_df[partition, ]
+train_x = train_df[, c(1:10)]
+train_y = train_df$stroke
+
+test_df = stroke_df[-partition, ]
+# Testing data: randomly downsample the major class (stroke = 0)
+test_df = ovun.sample(stroke ~ ., data = test_df, method = "under", seed = 1)$data
+test_x = test_df[, c(1:10)]
+test_y = test_df$stroke
+```
+
+The final testing dataset contains 145 observations, with 74 stroke cases and 73 healthy cases. 
+
+
+# Models
+Since the dataset contains 7 categorical predictors, 3 numeric predictors, and a binary response variable, I will train the following models: Logistic Regression (GLM), Generalized Additive Model (GAM), Multivariate Adaptive Regression Splines (MARS), and Recursive Partitioning Trees (Rpart).  
+
+## Train Control
+Using 10-fold cross validation, and perform random up-samping on the minority class (stroke = yes) on every fold's training data.  
+```{r}
+ctrl = trainControl(method = "cv", 
+                    number = 10,
+                    summaryFunction = twoClassSummary, 
+                    classProbs = TRUE,
+                    sampling = 'up')
+```
+
+
+## 1. GLM
+Here we assume that: No severe multicolineality among the predictors; The response variable (stroke) has linear relationships with the predictors; Each observation in each training dataset to be independent.
+The logistic model has the limitation that it cannot depict non-linear relationship between predictors and response. 
+
+### Fit the model
+```{r  warning=FALSE}
+model.glm = train(x = train_x,
+                  y = train_y,
+                  method = "glm",
+                  metric = "ROC",
+                  trControl = ctrl)
+
+summary(model.glm)
+model.glm
+```
+The model includes all 7 categorical predictors and 3 numeric predictors. At the 5% significant level, we can observe a lot of significant predictors, with most of the fitting my expectation in the data exploration process: gender, age, hypertension, heart disease, work type, average glucose, bmi and smoking status. The coefficients of these predictors also match my expectations in the data exploration.  
+The model achieves resampling average ROC = 0.831, Sensitivity = 0.734 and specificity = 0.789. Now we will see it's performance on the testing dataset.
+
+
+### Consider the simple classifier with a cut-off of 0.5 and evaluate its performance on the test data.
+```{r  warning=FALSE, message=FALSE}
+test.pred = predict(model.glm, newdata = test_df, type = "prob")
+test.prob = ifelse(test.pred$pos > 0.5, "pos", "neg")
+
+confusionMatrix(data = as.factor(test.prob),
+                reference = test_y,
+                positive = "pos")
+
+roc.glm = roc(test_y, test.pred[, 2])
+plot(roc.glm, legacy.axes = TRUE, print.auc = TRUE) 
+plot(smooth(roc.glm), col = 4, add = TRUE)
+```
+On the testing dataset with no information rate 0.5, the logistic model has 0.8095 accuracy, 0.851 sensitivity and 0.767 specificity, AUC = 0.904, with kappa = 0.619. The upsampling of minority stroke observations in the training folds enabled the model to correctly identify patients that will get stroke.
+
