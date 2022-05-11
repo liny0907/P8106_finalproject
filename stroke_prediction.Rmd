@@ -32,6 +32,7 @@ theme_set(theme_minimal() + theme(legend.position = "bottom"))
 ## Data Cleaning
 
 ```{r  warning=FALSE, message=FALSE}
+set.seed(500)
 stroke <- read_csv("healthcare-dataset-stroke-data.csv") %>% 
   janitor::clean_names() %>% 
   dplyr::select(-1) %>% 
@@ -51,6 +52,7 @@ stroke <- read_csv("healthcare-dataset-stroke-data.csv") %>%
 
 ## EDA
 ```{r}
+set.seed(500)
 #prevalence of stroke
 stroke %>%
   group_by(stroke) %>% 
@@ -98,6 +100,7 @@ corrplot::corrplot(cor(stroke[1:10]),
 ## Models
 
 ```{r  fig.height=4}
+set.seed(500)
 #check missing values
 vis_miss(stroke)
 
@@ -108,16 +111,20 @@ sapply(stroke_dat, function(x) sum(is.na(x)))
 ```
 
 ```{r  warning=FALSE}
-set.seed(8106)
+set.seed(500)
+stroke_dat <- ovun.sample(stroke~., data = stroke_dat, method = "under", seed = 1)$data
+stroke_dat <- stroke_dat[sample(nrow(stroke_dat)),]
+
 trainRows <- createDataPartition(y = stroke_dat$stroke, p = 0.8, list = F)
 
 #downsample the training data
-stroke_train <- ovun.sample(stroke~., data = stroke_dat[trainRows, ], method = "under", seed = 1)$data
+stroke_train <- stroke_dat[trainRows,]
 train_x <- stroke_train[, -11]
 train_y <- stroke_train$stroke
 
 #downsample the test data
-stroke_test = ovun.sample(stroke ~ ., data = stroke_dat[-trainRows, ], method = "under", seed = 1)$data
+#stroke_test = ovun.sample(stroke ~ ., data = stroke_dat[-trainRows, ], method = "under", #seed = 1)$data
+stroke_test <- stroke_dat[-trainRows,]
 test_x = stroke_test[, -11]
 test_y = stroke_test$stroke
 
@@ -125,14 +132,15 @@ ctrl = trainControl(method = "cv",
                     number = 10,
                     summaryFunction = twoClassSummary, 
                     classProbs = TRUE)
-                    #sampling = 'up')
 ```
 
 ### Penalized Logistic Regression
 ```{r}
+set.seed(500)
+
 glmngrid <- expand.grid(.alpha = seq(0, 1, length = 21),
-                        .lambda = exp(seq(-6, -1, length = 30)))
-set.seed(8106)
+                        .lambda = exp(seq(-7, -2, length = 30)))
+
 model.glmn <- train(x = train_x,
                     y = train_y,
                     method = "glmnet",
@@ -150,19 +158,17 @@ plot(model.glmn, par.settings = myPar, xTrans = function(x) log(x))
 
 ### LDA
 ```{r}
-set.seed(8106)
+set.seed(500)
 model.lda <- train(x = train_x,
                    y = train_y,
                    method = "lda",
                    metric = "ROC",
                    trControl = ctrl)
-
-#plot(model.lda)
 ```
 
 ### GAM
 ```{r}
-set.seed(8106)
+set.seed(500)
 model.gam <- train(x = train_x,
                    y = train_y,
                    method = "gam",
@@ -175,7 +181,7 @@ plot(model.gam$finalModel, select = 3)
 
 ### MARS
 ```{r}
-set.seed(8106)
+set.seed(500)
 model.mars = train(x = train_x,
                    y = train_y,
                    method = "earth",
@@ -187,28 +193,15 @@ plot(model.mars)
 model.mars$bestTune
 ```
 
-### Classification Tree
-```{r}
-set.seed(8106)
-rpart.fit <- train(stroke ~ .,
-                   data = stroke_train,
-                   method = "rpart",
-                   tuneGrid = data.frame(cp = exp(seq(-10, -5, len = 50))),
-                   trControl = ctrl,
-                   metric = "ROC")
-
-ggplot(rpart.fit, highlight = TRUE)
-rpart.fit$bestTune
-rpart.plot(rpart.fit$finalModel)
-summary(resamples(list(rpart.fit, model.glmn)))
-```
 
 ### Random Forest
 ```{r, warning=FALSE, dpi=300}
+set.seed(500)
+
 rf.grid <- expand.grid(mtry = 1:10,
                        splitrule = "gini",
                        min.node.size = 2:10)
-set.seed(8106)
+
 rf.fit <- train(stroke ~ . ,
                 stroke_train, 
                 method = "ranger",
@@ -219,7 +212,7 @@ rf.fit <- train(stroke ~ . ,
 rf.fit$bestTune
 
 ggplot(rf.fit, highlight = TRUE)
-rf.pred <- predict(rf.fit, newdata = stroke_test, type = "prob")[,1]
+rf.pred <- predict(rf.fit, newdata = stroke_test, type = "prob")[,2]
 pred <- ifelse(rf.pred > 0.5, "pos", "neg")
 confusionMatrix(data = as.factor(pred),
                 reference = stroke_test$stroke,
@@ -229,7 +222,7 @@ confusionMatrix(data = as.factor(pred),
 ### SVM
 ```{r, warning=FALSE, dpi=300}
 #linear kernel
-set.seed(8106)
+set.seed(500)
 svml.fit <- train(stroke ~ . , 
                   data = stroke_train, 
                   method = "svmLinear",
@@ -243,34 +236,91 @@ svml.fit$bestTune
 svmr.grid <- expand.grid(C = exp(seq(-5, 2 , len = 50)),
                          sigma = exp(seq(-8, -2, len = 50)))
 
-set.seed(8106)             
-svmr.fit <- train(stroke ~ . , 
-                  data = stroke_train,
-                  method = "svmRadialSigma",
-                  tuneGrid = svmr.grid,
-                  trControl = ctrl)
-
-myCol <- rainbow(20)
-myPar <- list(superpose.symbol = list(col = myCol),
-              superpose.line = list(col = myCol))
-
-plot(svmr.fit, highlight = TRUE, par.settings = myPar)
-svmr.fit$bestTune
 ```
 
 ## Model Comparison
 ```{r}
-res <- resamples(list(glmn = model.glmn, lda = model.lda, gam = model.gam, mars = model.mars, rf = rf.fit, svml = svml.fit, svmr = svmr.fit))
+res <- resamples(list(glmn = model.glmn, lda = model.lda, gam = model.gam, mars = model.mars, rf = rf.fit, svml = svml.fit))
 roc_summary <- summary(res)$statistics[1]
 roc_summary %>% knitr::kable()
 
 bwplot(res, metric = "ROC")
 
-rf.pred <- predict(rf.fit, newdata = stroke_test, type = "prob")[,1]
-pred <- ifelse(rf.pred > 0.5, "pos", "neg")
-confusionMatrix(data = as.factor(pred),
+
+rf.pred.prob <- predict(rf.fit, newdata = stroke_test, type = "prob")[, 2]
+rf.pred <- ifelse(rf.pred.prob > 0.5, "pos", "neg")
+confusionMatrix(data = as.factor(rf.pred),
                 reference = stroke_test$stroke,
                 positive = "pos")
-summary(stroke_test)
+
+svml.pred.prob <- predict(svml.fit, newdata = stroke_test, type = "prob")[, 2]
+svml.pred <- ifelse(svml.pred.prob > 0.4, "pos", "neg")
+confusionMatrix(data = as.factor(svml.pred),
+                reference = stroke_test$stroke,
+                positive = "pos")
+
+
+roc.rf <- roc(stroke_test$stroke, rf.pred)
+
+auc1 <- roc.rf$auc[1]
+auc1
+plot(roc.rf, legacy.axes = TRUE)
+plot(smooth(roc.rf), col = 4, add = TRUE)
+legend("bottomright", legend = paste0("rf AUC", ": ", round(auc1, 3)), cex = 1)
+
+```
+
+
+### Variable Importance
+```{r}
+set.seed(8106)
+rf.final.per <- ranger(stroke ~ . , 
+                       stroke_train, 
+                       mtry = rf.fit$bestTune[[1]], 
+                       min.node.size = rf.fit$bestTune[[3]],
+                       splitrule = "gini",
+                       importance = "permutation",
+                       scale.permutation.importance = TRUE) 
+
+barplot(sort(ranger::importance(rf.final.per), decreasing = FALSE), 
+        las = 2, horiz = TRUE, cex.names = 0.7,
+        col = colorRampPalette(colors = c("cyan","blue"))(8))
+
+set.seed(8106)
+rf.final.imp <- ranger(stroke ~ . , 
+                       stroke_train, 
+                       mtry = rf.fit$bestTune[[1]], 
+                       splitrule = "gini",
+                       min.node.size = rf.fit$bestTune[[3]],
+                       importance = "impurity") 
+
+barplot(sort(ranger::importance(rf.final.imp), decreasing = FALSE), 
+        las = 2, horiz = TRUE, cex.names = 0.7,
+        col = colorRampPalette(colors = c("cyan","blue"))(8))
+```
+
+
+### PDP
+```{r}
+pdp.rf.age <- rf.fit %>% 
+  partial(pred.var = "age", 
+          grid.resolution = 100,
+          prob = TRUE) %>%
+  autoplot(rug = TRUE, train = stroke_train) +
+  ggtitle("Random forest") 
+
+pdp.rf.bmi <- rf.fit %>% 
+  partial(pred.var = "bmi", 
+          grid.resolution = 100,
+          prob = TRUE) %>%
+  autoplot(rug = TRUE, train = stroke_train) +
+  ggtitle("Random forest") 
+
+pdp.rf.glucose <- rf.fit %>% 
+  partial(pred.var = "healthcare-dataset-stroke-data.csvQ", 
+          grid.resolution = 100,
+          prob = TRUE) %>%
+  autoplot(rug = TRUE, train = stroke_train) +
+  ggtitle("Random forest") 
 ```
 
