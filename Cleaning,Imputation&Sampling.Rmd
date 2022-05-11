@@ -8,8 +8,6 @@ output:
 ---
 
 
-
-
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(caret)
@@ -20,7 +18,6 @@ library(pdp)
 library(vip)
 library(visdat)
 library(AppliedPredictiveModeling)
-library(performanceEstimation)
 library(mice)
 library(ROSE)
 library(gridExtra)

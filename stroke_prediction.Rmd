@@ -1,0 +1,276 @@
+---
+title: "Stroke Predcition"
+author: "Lin Yang, Weiheng Zhang, Fei Sun"
+date: "2022/5/12"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(mlbench)
+library(pROC)
+library(pdp)
+library(vip)
+library(visdat)
+library(AppliedPredictiveModeling)
+library(mice)
+library(ROSE)
+library(gridExtra)
+library(mvtnorm)
+library(corrplot)
+library(rpart.plot)
+library(e1071)
+library(kernlab)
+library(patchwork)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+## Data Cleaning
+
+```{r  warning=FALSE, message=FALSE}
+stroke <- read_csv("healthcare-dataset-stroke-data.csv") %>% 
+  janitor::clean_names() %>% 
+  dplyr::select(-1) %>% 
+  filter(gender == "Male" | gender == "Female" ) %>% 
+  mutate(bmi = as.numeric(bmi),
+         gender = as.numeric(factor(gender)) - 1,
+         ever_married = as.numeric(factor(ever_married)) - 1,
+         work_type = as.numeric(factor(work_type)) - 1,
+         residence_type = as.numeric(factor(residence_type)) - 1,
+         smoking_status = as.numeric(factor(smoking_status)) - 1,
+         stroke = factor(stroke,
+                         levels = c("0", "1"),
+                         labels = c("neg", "pos"))) %>% 
+  as.data.frame()
+
+```
+
+## EDA
+```{r}
+#prevalence of stroke
+stroke %>%
+  group_by(stroke) %>% 
+  summarize(count = n()) %>% 
+  mutate(proportion = round(count / sum(count), 3)) %>% 
+  knitr::kable()
+
+#boxplots of continuous variables
+age <- ggplot(data = stroke, aes(x = stroke, y = age), group = stroke) +
+  geom_boxplot() +
+  labs(x = " ",
+       y = "Age")
+
+glucose <- ggplot(data = stroke, aes(x = stroke, y = avg_glucose_level), group = stroke) +
+  geom_boxplot() +
+  labs(x = "Stroke Status",
+       y = "Average Glucose Level")
+
+bmi <- ggplot(data = stroke, aes(x = stroke, y = bmi), group = stroke) +
+  geom_boxplot() +
+  labs(x = " ",
+       y = "BMI")
+
+age + glucose + bmi
+
+#density plots of stroke vs continuous variables
+theme1 <- transparentTheme(trans = .4)
+trellis.par.set(theme1)
+
+featurePlot(x = stroke %>% dplyr::select(age, avg_glucose_level, bmi), 
+            y = stroke$stroke,
+            scales = list(x = list(relation = "free"), 
+                          y = list(relation = "free")),
+            plot = "density", pch = "|", 
+            auto.key = list(columns = 2))
+
+#correlation plot of predictors
+corrplot::corrplot(cor(stroke[1:10]), 
+         method = "circle", 
+         type = "full",
+         tl.cex = 0.5)
+```
+
+   
+## Models
+
+```{r  fig.height=4}
+#check missing values
+vis_miss(stroke)
+
+#KNN Imputation to fill missing bmi values
+knnImp <- preProcess(stroke, method = "knnImpute", k = 3)
+stroke_dat <- predict(knnImp, stroke)
+sapply(stroke_dat, function(x) sum(is.na(x)))
+```
+
+```{r  warning=FALSE}
+set.seed(8106)
+trainRows <- createDataPartition(y = stroke_dat$stroke, p = 0.8, list = F)
+
+#downsample the training data
+stroke_train <- ovun.sample(stroke~., data = stroke_dat[trainRows, ], method = "under", seed = 1)$data
+train_x <- stroke_train[, -11]
+train_y <- stroke_train$stroke
+
+#downsample the test data
+stroke_test = ovun.sample(stroke ~ ., data = stroke_dat[-trainRows, ], method = "under", seed = 1)$data
+test_x = stroke_test[, -11]
+test_y = stroke_test$stroke
+
+ctrl = trainControl(method = "cv", 
+                    number = 10,
+                    summaryFunction = twoClassSummary, 
+                    classProbs = TRUE)
+                    #sampling = 'up')
+```
+
+### Penalized Logistic Regression
+```{r}
+glmngrid <- expand.grid(.alpha = seq(0, 1, length = 21),
+                        .lambda = exp(seq(-6, -1, length = 30)))
+set.seed(8106)
+model.glmn <- train(x = train_x,
+                    y = train_y,
+                    method = "glmnet",
+                    tuneGrid = glmngrid,
+                    metric = "ROC",
+                    trControl = ctrl)
+
+model.glmn$bestTune
+
+myCol <- rainbow(25)
+myPar <- list(superpose.symbol = list(col = myCol),
+              superpose.line = list(col = myCol))
+plot(model.glmn, par.settings = myPar, xTrans = function(x) log(x))
+```
+
+### LDA
+```{r}
+set.seed(8106)
+model.lda <- train(x = train_x,
+                   y = train_y,
+                   method = "lda",
+                   metric = "ROC",
+                   trControl = ctrl)
+
+#plot(model.lda)
+```
+
+### GAM
+```{r}
+set.seed(8106)
+model.gam <- train(x = train_x,
+                   y = train_y,
+                   method = "gam",
+                   metric = "ROC",
+                   trControl = ctrl)
+
+model.gam$finalModel
+plot(model.gam$finalModel, select = 3)
+```
+
+### MARS
+```{r}
+set.seed(8106)
+model.mars = train(x = train_x,
+                   y = train_y,
+                   method = "earth",
+                   tuneGrid = expand.grid(degree = 1:3,
+                                          nprune = 2:18),
+                   metric = "ROC",
+                   trControl = ctrl)
+plot(model.mars)
+model.mars$bestTune
+```
+
+### Classification Tree
+```{r}
+set.seed(8106)
+rpart.fit <- train(stroke ~ .,
+                   data = stroke_train,
+                   method = "rpart",
+                   tuneGrid = data.frame(cp = exp(seq(-10, -5, len = 50))),
+                   trControl = ctrl,
+                   metric = "ROC")
+
+ggplot(rpart.fit, highlight = TRUE)
+rpart.fit$bestTune
+rpart.plot(rpart.fit$finalModel)
+summary(resamples(list(rpart.fit, model.glmn)))
+```
+
+### Random Forest
+```{r, warning=FALSE, dpi=300}
+rf.grid <- expand.grid(mtry = 1:10,
+                       splitrule = "gini",
+                       min.node.size = 2:10)
+set.seed(8106)
+rf.fit <- train(stroke ~ . ,
+                stroke_train, 
+                method = "ranger",
+                tuneGrid = rf.grid,
+                metric = "ROC",
+                trControl = ctrl)
+
+rf.fit$bestTune
+
+ggplot(rf.fit, highlight = TRUE)
+rf.pred <- predict(rf.fit, newdata = stroke_test, type = "prob")[,1]
+pred <- ifelse(rf.pred > 0.5, "pos", "neg")
+confusionMatrix(data = as.factor(pred),
+                reference = stroke_test$stroke,
+                positive = "pos")
+```
+
+### SVM
+```{r, warning=FALSE, dpi=300}
+#linear kernel
+set.seed(8106)
+svml.fit <- train(stroke ~ . , 
+                  data = stroke_train, 
+                  method = "svmLinear",
+                  tuneGrid = data.frame(C = exp(seq(-6, -2, len = 50))),
+                  trControl = ctrl)
+
+plot(svml.fit, highlight = TRUE, xTrans = log)
+svml.fit$bestTune
+
+#radial kernel
+svmr.grid <- expand.grid(C = exp(seq(-5, 2 , len = 50)),
+                         sigma = exp(seq(-8, -2, len = 50)))
+
+set.seed(8106)             
+svmr.fit <- train(stroke ~ . , 
+                  data = stroke_train,
+                  method = "svmRadialSigma",
+                  tuneGrid = svmr.grid,
+                  trControl = ctrl)
+
+myCol <- rainbow(20)
+myPar <- list(superpose.symbol = list(col = myCol),
+              superpose.line = list(col = myCol))
+
+plot(svmr.fit, highlight = TRUE, par.settings = myPar)
+svmr.fit$bestTune
+```
+
+## Model Comparison
+```{r}
+res <- resamples(list(glmn = model.glmn, lda = model.lda, gam = model.gam, mars = model.mars, rf = rf.fit, svml = svml.fit, svmr = svmr.fit))
+roc_summary <- summary(res)$statistics[1]
+roc_summary %>% knitr::kable()
+
+bwplot(res, metric = "ROC")
+
+rf.pred <- predict(rf.fit, newdata = stroke_test, type = "prob")[,1]
+pred <- ifelse(rf.pred > 0.5, "pos", "neg")
+confusionMatrix(data = as.factor(pred),
+                reference = stroke_test$stroke,
+                positive = "pos")
+summary(stroke_test)
+```
+
